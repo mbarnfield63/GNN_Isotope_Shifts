@@ -92,16 +92,40 @@ class IsotopeDataset(InMemoryDataset):
                         edge_indices.append([indices[i], indices[j]])
                         edge_indices.append([indices[j], indices[i]])
 
-        # Convert to Tensors
+        # 1. Initialize the Data object with basic structure
+        edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
+        data = Data(edge_index=edge_index)
+
+        # 2. Convert raw data to tensors
         x = torch.tensor(all_nodes, dtype=torch.float)
         y = torch.tensor(all_targets, dtype=torch.float).view(-1, 1)
         unc = torch.tensor(all_uncertainties, dtype=torch.float).view(-1, 1)
         mask = torch.tensor(all_masks, dtype=torch.bool)
-        edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
 
-        data = Data(x=x, y=y, edge_index=edge_index)
+        # 3. Calculate stats only from training nodes
+        train_x = x[mask]
+        x_mean = train_x.mean(dim=0)
+        x_std = train_x.std(dim=0)
+        x_std[x_std == 0] = 1.0
+
+        train_y = y[mask]
+        y_mean = train_y.mean()
+        y_std = train_y.std()
+
+        # 4. Apply scaling and assign to the Data object
+        x_norm = (x - x_mean) / x_std
+        y_norm = (y - y_mean) / y_std
+
+        # 5. Store uncertainties and masks as part of the Data object
+        data = Data(x=x_norm, y=y_norm, edge_index=edge_index)
         data.unc = unc
         data.train_mask = mask
 
-        # Save processed data
+        # Assign these so they are recognized as part of the data object
+        data.x_mean = x_mean
+        data.x_std = x_std
+        data.y_mean = y_mean
+        data.y_std = y_std
+
+        # 6. Save processed data
         torch.save(self.collate([data]), self.processed_paths[0])
