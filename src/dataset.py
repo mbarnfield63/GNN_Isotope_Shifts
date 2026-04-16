@@ -9,8 +9,6 @@ class IsotopeDataset(InMemoryDataset):
     def __init__(self, root, transform=None, pre_transform=None):
         # Allow the PyG classes to be unpickled safely
         torch.serialization.add_safe_globals([Data])
-        # If the error mentions DataEdgeAttr or others, add them too:
-        # torch.serialization.add_safe_globals([Data, 'torch_geometric.data.data.DataEdgeAttr'])
         super().__init__(root, transform, pre_transform)
         self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
