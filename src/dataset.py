@@ -94,7 +94,6 @@ class IsotopeDataset(InMemoryDataset):
 
         # 1. Initialize the Data object with basic structure
         edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
-        data = Data(edge_index=edge_index)
 
         # 2. Convert raw data to tensors
         x = torch.tensor(all_nodes, dtype=torch.float)
@@ -102,23 +101,36 @@ class IsotopeDataset(InMemoryDataset):
         unc = torch.tensor(all_uncertainties, dtype=torch.float).view(-1, 1)
         mask = torch.tensor(all_masks, dtype=torch.bool)
 
+        # NaN Handling: Replace NaNs in features and targets with zeros
+        x = torch.nan_to_num(x, nan=0.0)
+        y = torch.nan_to_num(y, nan=0.0)
+        # Replace missing uncertainties with a small default (e.g., 0.00001 cm-1)
+        unc = torch.nan_to_num(unc, nan=0.00001)
+
         # 3. Calculate stats only from training nodes
         train_x = x[mask]
         x_mean = train_x.mean(dim=0)
         x_std = train_x.std(dim=0)
+
+        # Prevent division by zero OR NaNs in standard deviation
+        x_std = torch.nan_to_num(x_std, nan=1.0)
         x_std[x_std == 0] = 1.0
 
         train_y = y[mask]
         y_mean = train_y.mean()
         y_std = train_y.std()
 
+        if y_std == 0 or torch.isnan(y_std):
+            y_std = torch.tensor(1.0)
+
         # 4. Apply scaling and assign to the Data object
         x_norm = (x - x_mean) / x_std
         y_norm = (y - y_mean) / y_std
+        unc_norm = unc / y_std
 
         # 5. Store uncertainties and masks as part of the Data object
         data = Data(x=x_norm, y=y_norm, edge_index=edge_index)
-        data.unc = unc
+        data.unc = unc_norm
         data.train_mask = mask
 
         # Assign these so they are recognized as part of the data object
