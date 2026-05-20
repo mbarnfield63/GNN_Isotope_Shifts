@@ -5,10 +5,14 @@ import os
 # CONFIGURATION SECTION
 # ==========================================================
 
+# Molecule name
+MOLECULE_NAME = "31P14N"
+MASS_A = 30.9737619985  # Atomic mass of P
+MASS_B = 14.0030740048  # Atomic mass of N
+X_ELEC = "X1Sigma+"  # Target electronic state to extract
+
 # 1. Path to the source ExoMol .states file
-SOURCE_STATES_FILE = (
-    r"C:\Code\Work\raw_data_store\Diatomics\SO\Full\32S-16O__SOLIS.states"
-)
+SOURCE_STATES_FILE = r"C:\Code\Work\raw_data_store\Diatomics\PN\31P-14N__PaiN.states"
 
 # 2. List of ALL entries/columns as they appear in the source file
 # Note: ExoMol formats vary by molecule; check the associated .def file.
@@ -19,7 +23,9 @@ FULL_COLUMN_NAMES = [
     "J",  # Total angular momentum
     "unc",  # Uncertainty
     "tau",  # Lifetime (optional)
-    "hunda:+/-",  # Parity
+    "gfactor",  # Lande g-factor (optional)
+    "parity",  # Parity (e.g., '+' or '-')
+    "rotlessparity",  # Rotationless parity (optional)
     "hunda:ElectronicState",  # Electronic state label
     "hunda:v",  # Vibrational quantum number
     "hunda:Lambda",  # Projection of electronic angular momentum
@@ -32,21 +38,21 @@ FULL_COLUMN_NAMES = [
 # 3. Rename columns as required
 RENAMING_MAP = {
     "E": "EMarv",
+    "Ecalc": "ECalc",
     "hunda:v": "v",
     "hunda:ElectronicState": "ElecState",
 }
 
-# 4. The specific columns you want to "scrape" into your new CSV
+# 4. The specific columns for new CSV
 COLUMNS_NEEDED = [
     "v",
     "J",
-    "Ecalc",
+    "ECalc",
     "EMarv",
     "unc",
 ]
 
 # 5. Output Naming Format
-MOLECULE_NAME = "32S-16O"
 OUTPUT_DIRECTORY = "data/preprocessed"
 OUTPUT_FILENAME = f"{MOLECULE_NAME}.csv"
 
@@ -77,13 +83,21 @@ def process_states():
             df.rename(columns=RENAMING_MAP, inplace=True)
 
         # Filter to only Electronic State X
-        df = df[df["ElecState"] == "X(3SIGMA-)"]
+        df = df[df["ElecState"] == X_ELEC].copy()
 
         # If source is not MARVEL, set EMarv to NaN since it's not from MARVEL
         df.loc[df["Source"] != "Ma", "EMarv"] = pd.NA
 
         # Scrape only the requested columns
         extracted_df = df[COLUMNS_NEEDED]
+
+        # Masses and reduced mass calcs
+        mu = (MASS_A * MASS_B) / (MASS_A + MASS_B)
+        extracted_df = extracted_df.assign(
+            mass_A=MASS_A,
+            mass_B=MASS_B,
+            reduced_mass=mu,
+        )
 
         # Save to CSV
         save_path = os.path.join(OUTPUT_DIRECTORY, OUTPUT_FILENAME)
