@@ -53,7 +53,7 @@ COLUMNS_NEEDED = [
 ]
 
 # 5. Output Naming Format
-OUTPUT_DIRECTORY = "data/preprocessed"
+OUTPUT_DIRECTORY = "data/states"
 OUTPUT_FILENAME = f"{MOLECULE_NAME}.csv"
 
 # ==========================================================
