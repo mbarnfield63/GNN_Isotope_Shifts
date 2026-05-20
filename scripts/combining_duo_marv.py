@@ -1,11 +1,18 @@
 import os
 import pandas as pd
-from src.config import ISOTOPOLOGUE_CONFIGS
 
 # CONFIG
-ISO_NUMBERS = [26, 27, 28, 36, 37, 38]
-DUO_DIR = r"C:\Code\Work\raw_data_store\Diatomics\CO"
-MARVEL_DIR = r"C:\Code\Work\raw_data_store\Diatomics\CO"
+DATA_DIR = r"C:\Code\Work\raw_data_store\Diatomics\CO"
+OUTPUT_DIR = r"./data/states"
+
+CO_ISOTOPES = {
+    26: {"out_name": "12C16O", "mass_A": 12.0000000, "mass_B": 15.9949146},
+    27: {"out_name": "12C17O", "mass_A": 12.0000000, "mass_B": 16.9991317},
+    28: {"out_name": "12C18O", "mass_A": 12.0000000, "mass_B": 17.9991596},
+    36: {"out_name": "13C16O", "mass_A": 13.0033548, "mass_B": 15.9949146},
+    37: {"out_name": "13C17O", "mass_A": 13.0033548, "mass_B": 16.9991317},
+    38: {"out_name": "13C18O", "mass_A": 13.0033548, "mass_B": 17.9991596},
+}
 
 
 def parse_duo_output(filename):
@@ -102,8 +109,8 @@ def load_marvel_data(marvel_directory):
 
 
 def combine_datasets(duo_data_dict, marvel_data_dict):
-    # Isotopologue numbers between DUO and MARVEL data
-    iso_numbers = [26, 27, 28, 36, 37, 38]
+    # Get list of isotopologue numbers from the keys of the dictionaries
+    iso_numbers = list(CO_ISOTOPES.keys())
 
     # Process each isotopologue
     for number in iso_numbers:
@@ -112,23 +119,40 @@ def combine_datasets(duo_data_dict, marvel_data_dict):
         marvel_data = marvel_data_dict[f"marvel_data_{number}"]
 
         # Get iso name from config based on number
-        iso_name = None
-        for name, config in ISOTOPOLOGUE_CONFIGS.items():
-            if config["iso"] == int(number):
-                iso_name = name
-                break
+        iso_name = CO_ISOTOPES[number]["out_name"]
 
         # Merge the data
         combined = pd.merge(duo_data, marvel_data, on=["v", "J"], how="outer")
         combined = combined[["v", "J", "ECalc", "EMarv", "unc"]]
+        combined = combined.assign(
+            mass_A=CO_ISOTOPES[number]["mass_A"],
+            mass_B=CO_ISOTOPES[number]["mass_B"],
+            reduced_mass=(CO_ISOTOPES[number]["mass_A"] * CO_ISOTOPES[number]["mass_B"])
+            / (CO_ISOTOPES[number]["mass_A"] + CO_ISOTOPES[number]["mass_B"]),
+        )
+        combined["Ediff"] = combined["EMarv"] - combined["ECalc"]
+
+        final = combined[
+            [
+                "mass_A",
+                "mass_B",
+                "reduced_mass",
+                "v",
+                "J",
+                "ECalc",
+                "EMarv",
+                "unc",
+                "Ediff",
+            ]
+        ]
 
         # Save the combined data for this isotopologue
-        combined.to_csv(f"data/preprocessed/{iso_name}.csv", index=False)
+        final.to_csv(f"{OUTPUT_DIR}/{iso_name}.csv", index=False)
 
 
 if __name__ == "__main__":
-    duo_data_dict = load_duo_data(DUO_DIR)
-    marvel_data_dict = load_marvel_data(MARVEL_DIR)
+    duo_data_dict = load_duo_data(DATA_DIR)
+    marvel_data_dict = load_marvel_data(DATA_DIR)
 
     combined_data = combine_datasets(duo_data_dict, marvel_data_dict)
     print("Datasets combined and saved successfully.")

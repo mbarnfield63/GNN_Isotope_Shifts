@@ -44,12 +44,16 @@ RENAMING_MAP = {
 }
 
 # 4. The specific columns for new CSV
-COLUMNS_NEEDED = [
+COLUMNS = [
+    "mass_A",
+    "mass_B",
+    "reduced_mass",
     "v",
     "J",
     "ECalc",
     "EMarv",
     "unc",
+    "Ediff",
 ]
 
 # 5. Output Naming Format
@@ -88,22 +92,24 @@ def process_states():
         # If source is not MARVEL, set EMarv to NaN since it's not from MARVEL
         df.loc[df["Source"] != "Ma", "EMarv"] = pd.NA
 
-        # Scrape only the requested columns
-        extracted_df = df[COLUMNS_NEEDED]
-
         # Masses and reduced mass calcs
         mu = (MASS_A * MASS_B) / (MASS_A + MASS_B)
-        extracted_df = extracted_df.assign(
+        df = df.assign(
             mass_A=MASS_A,
             mass_B=MASS_B,
             reduced_mass=mu,
         )
+        # Calculate energy difference where both EMarv and ECalc are available
+        df["Ediff"] = df["EMarv"] - df["ECalc"]
+
+        # Select only the columns needed for the final output
+        extracted_df = df[COLUMNS]
 
         # Save to CSV
         save_path = os.path.join(OUTPUT_DIRECTORY, OUTPUT_FILENAME)
         extracted_df.to_csv(save_path, index=False)
 
-        print(f"Success! Extracted {len(COLUMNS_NEEDED)} columns.")
+        print(f"Success! Extracted {len(COLUMNS)} columns.")
         print(f"Saved to: {save_path}")
 
     except FileNotFoundError:
