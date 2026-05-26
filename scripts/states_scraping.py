@@ -6,14 +6,14 @@ import os
 # ==========================================================
 
 # Molecule name
-MOLECULE_NAME = "31P14N"
-MASS_A = 30.9737619985  # Atomic mass of P
-MASS_B = 14.0030740048  # Atomic mass of N
-X_ELEC = "X1Sigma+"  # Target electronic state to extract
+MOLECULE_NAME = "12C14N"
+MASS_A = 12.0000000  # Atomic mass of C
+MASS_B = 14.0030740  # Atomic mass of N
+X_ELEC = "X"  # Target electronic state to extract
+MARVEL_SOURCE_CODE = "M"  # Code in the .states file indicating MARVEL data
 
 # 1. Path to the source ExoMol .states file
-SOURCE_STATES_FILE = r"C:\Code\Work\raw_data_store\Diatomics\PN\31P-14N__PaiN.states"
-
+SOURCE_STATES_FILE = r"C:\Code\Work\raw_data_store\Diatomics\CN\12C-14N__KTPSYT.states"
 # 2. List of ALL entries/columns as they appear in the source file
 # Note: ExoMol formats vary by molecule; check the associated .def file.
 FULL_COLUMN_NAMES = [
@@ -90,7 +90,7 @@ def process_states():
         df = df[df["ElecState"] == X_ELEC].copy()
 
         # If source is not MARVEL, set EMarv to NaN since it's not from MARVEL
-        df.loc[df["Source"] != "Ma", "EMarv"] = pd.NA
+        df.loc[df["Source"] != MARVEL_SOURCE_CODE, "EMarv"] = pd.NA
 
         # Masses and reduced mass calcs
         mu = (MASS_A * MASS_B) / (MASS_A + MASS_B)
