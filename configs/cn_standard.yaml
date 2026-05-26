@@ -1,0 +1,74 @@
+# ==========================================
+# GNN ISOTOPE SHIFT PIPELINE CONFIGURATION
+# ==========================================
+
+experiment:
+  name: "CN_Standard_Run"
+  output_base_dir: "./data/outputs"
+
+execution:
+  # Set to standard split
+  mode: "standard"  
+  # Set to false for a single fold (ignores num_seeds)
+  ensemble_run: false  
+  base_seed: 42
+
+molecules:
+  CN:
+    parent_isotope: "12C14N"
+    isotopes: ["12C14N"]
+    isotope_ids: [24]
+    parent_mass_A: 12.0000000
+    parent_mass_B: 14.0030740
+    parent_reduced_mass: 6.4621932
+
+# ------------------------------------------
+# DATA & FEATURES
+# ------------------------------------------
+data:
+  input_dir: "./data/states/"
+  max_energy_cutoff: 20000.0  # Keeps network focused on isotopic shifts, not high-energy breakdown
+  
+  # The explicit physics features that will be ZERO-CENTERED and fed to the Linear Bypass
+  physics_features: 
+    - 'mass_ratio_A'
+    - 'mass_ratio_B'
+    - 'mu_vib_ratio'
+    - 'mu_rot_ratio'
+
+  # Open-shell/Hyperfine padding: If a molecule lacks these in its .states file, 
+  # the dataset.py script will auto-pad them with 0.0 to maintain consistent tensor dimensions.
+  optional_quantum_features: []
+
+# ------------------------------------------
+# MODEL ARCHITECTURE
+# ------------------------------------------
+model:
+  architecture: "HybridIsotopologueGATv2"
+  hidden_dim: 32
+  heads: 4
+  dropout: 0.2
+  
+  # Edge categorical embedding (0: Physical, 1: Isotopic)
+  edge_embedding_dim: 8
+  num_edge_types: 2
+
+# ------------------------------------------
+# TRAINING PARAMETERS
+# ------------------------------------------
+training:
+  epochs: 2500
+  learning_rate: 0.001
+  patience: 100
+
+  # Scales the target shift values to a more GNN-friendly range (e.g., 0.001 cm^-1 becomes 1.0 after scaling)
+  scale_factor: 1000.0
+  
+  # Crucial parameter separation to protect the Linear Physics bypass from shrinking
+  weight_decay_gnn: 0.0001
+  weight_decay_physics: 0.0  
+  
+  # Only used if execution.mode == 'standard'
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
