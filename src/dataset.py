@@ -49,6 +49,14 @@ def load_and_preprocess_data(config, logger):
                 f"  - Iso {iso_id}: Dropped {initial_count - len(df)} high-energy states. {len(df)} remaining."
             )
 
+            if config["data"]["max_diff_cutoff"] is not None:
+                diff_cutoff = config["data"]["max_diff_cutoff"]
+                initial_count = len(df)
+                df = df[df["Ediff"].abs() <= diff_cutoff].copy()
+                logger.info(
+                    f"  - Iso {iso_id}: Dropped {initial_count - len(df)} states exceeding diff cutoff. {len(df)} remaining."
+                )
+
             # 2. Tag with metadata for graph grouping
             df["molecule"] = mol_name
             df["iso_id"] = iso_id
