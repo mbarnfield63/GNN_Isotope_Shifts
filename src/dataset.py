@@ -1,143 +1,195 @@
 import os
 import pandas as pd
+import numpy as np
 import torch
-from torch_geometric.data import Data, InMemoryDataset
-from src.config import ISOTOPOLOGUE_CONFIGS
+from torch_geometric.data import Data
 
 
-class IsotopeDataset(InMemoryDataset):
-    def __init__(self, root, transform=None, pre_transform=None):
-        # Allow the PyG classes to be unpickled safely
-        torch.serialization.add_safe_globals([Data])
-        super().__init__(root, transform, pre_transform)
-        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
+def load_and_preprocess_data(config, logger):
+    """
+    Iterates through the configuration dictionaries, loads CSV files, applies
+    energy cutoffs, calculates physical ratios, and concatenates the processed
+    data into a global dataframe.
 
-    @property
-    def raw_dir(self):
-        return os.path.join(self.root, "preprocessed")
+    Args:
+        config (dict): Configuration dictionary containing data and molecule parameters.
+        logger (logging.Logger): Logger instance for recording execution steps.
 
-    @property
-    def processed_dir(self):
-        return os.path.join(self.root, "processed")
+    Returns:
+        pd.DataFrame: A single concatenated dataframe containing all valid nodes
+        across all specified molecules and isotopes.
+    """
+    input_dir = config["data"]["input_dir"]
+    max_energy = config["data"]["max_energy_cutoff"]
+    physics_features = config["data"]["physics_features"]
+    optional_features = config["data"]["optional_quantum_features"]
 
-    @property
-    def raw_file_names(self):
-        # Look for the 6 CSV files defined in your config
-        return [f"{iso}.csv" for iso in ISOTOPOLOGUE_CONFIGS.keys()]
+    all_nodes = []
 
-    @property
-    def processed_file_names(self):
-        return ["multi_isotope_graph.pt"]
+    for mol_name, mol_config in config["molecules"].items():
+        logger.info(f"Processing Molecule: {mol_name}")
 
-    def process(self):
-        all_nodes = []
-        all_targets = []
-        all_uncertainties = []
-        all_masks = []
+        parent_mass_A = mol_config["parent_mass_A"]
+        parent_mass_B = mol_config["parent_mass_B"]
+        parent_mu = mol_config["parent_reduced_mass"]
 
-        # To track node indices across files for inter-isotope edges
-        # key: (v, J), value: list of (global_node_index, iso_name)
-        quantum_map = {}
-        current_idx = 0
+        for iso_name, iso_id in zip(mol_config["isotopes"], mol_config["isotope_ids"]):
+            file_path = os.path.join(input_dir, f"{iso_name}.csv")
 
-        edge_indices = []
+            if not os.path.exists(file_path):
+                logger.warning(f"File {file_path} not found. Skipping.")
+                continue
 
-        for iso_name, config in ISOTOPOLOGUE_CONFIGS.items():
-            path = os.path.join(self.raw_dir, rf"{iso_name}.csv")
-            df = pd.read_csv(path)
+            df = pd.read_csv(file_path)
 
-            iso_start_idx = current_idx
+            # 1. Apply Energy Cutoff
+            initial_count = len(df)
+            df = df[df["ECalc"] <= max_energy].copy()
+            logger.info(
+                f"  - Iso {iso_id}: Dropped {initial_count - len(df)} high-energy states. {len(df)} remaining."
+            )
 
-            for i, row in df.iterrows():
-                v, j = row["v"], row["J"]
+            # 2. Tag with metadata for graph grouping
+            df["molecule"] = mol_name
+            df["iso_id"] = iso_id
 
-                # 1. Features: [v, J, J*(J+1), E_calc, reduced_mass]
-                node_feat = [v, j, j * (j + 1), row["ECalc"], config["mu"]]
-                all_nodes.append(node_feat)
+            # 3. Calculate Base Dunham & Mass Ratios
+            df["mass_ratio_A"] = df["mass_A"] / parent_mass_A
+            df["mass_ratio_B"] = df["mass_B"] / parent_mass_B
+            df["mu_vib_ratio"] = (df["reduced_mass"] / parent_mu) ** -0.5
+            df["mu_rot_ratio"] = (df["reduced_mass"] / parent_mu) ** -1.0
 
-                # 2. Targets & Masks
-                # We predict the residual. If Marvel is NaN, residual is 0 (masked anyway)
-                is_marvel = not pd.isna(row["EMarv"])
-                residual = row["EMarv"] - row["ECalc"] if is_marvel else 0.0
-                unc = row["unc"] if is_marvel else 1.0  # 1.0 is dummy for masked nodes
+            # (If higher order terms are specified in the configuration, they are applied here)
+            if "mu_anharmonic_ratio" in physics_features:
+                df["mu_anharmonic_ratio"] = (df["reduced_mass"] / parent_mu) ** -1.5
+            if "mu_centrifugal_ratio" in physics_features:
+                df["mu_centrifugal_ratio"] = (df["reduced_mass"] / parent_mu) ** -2.0
 
-                all_targets.append(residual)
-                all_uncertainties.append(unc)
-                all_masks.append(is_marvel)
+            # 4. Handle Optional Quantum Features
+            # (Padding for closed-shell molecules to maintain consistent tensor dimensions)
+            for opt_feat in optional_features:
+                if opt_feat not in df.columns:
+                    df[opt_feat] = 0.0
 
-                # 3. Build Quantum Map for Inter-Isotope Edges
-                q_key = (v, j)
-                if q_key not in quantum_map:
-                    quantum_map[q_key] = []
-                quantum_map[q_key].append(current_idx)
+            # 5. Calculate Target Residual
+            # (MARVEL states possess an EMarv value; synthetic states evaluate to NaN)
+            if "EMarv" in df.columns:
+                df["is_known_marvel"] = df["EMarv"].notna()
+            else:
+                df["is_known_marvel"] = False
 
-                current_idx += 1
+            all_nodes.append(df)
 
-            # 4. Intra-Isotope Edges (Selection Rules: ΔJ = ±1)
-            # This is a simplification; for diatomic, we connect J to J+1 within same v
-            for j_val in df["J"].unique():
-                j_nodes = df[df["J"] == j_val].index + iso_start_idx
-                jp1_nodes = df[df["J"] == j_val + 1].index + iso_start_idx
-                for n1 in j_nodes:
-                    for n2 in jp1_nodes:
-                        edge_indices.append([n1, n2])
-                        edge_indices.append([n2, n1])
+    # Combine into one global dataframe
+    global_df = pd.concat(all_nodes, ignore_index=True)
 
-        # 5. Inter-Isotope Edges (Isotopic Bridges)
-        for q_key, indices in quantum_map.items():
-            if len(indices) > 1:
-                # Connect all molecules that share this (v, J) in a clique
-                for i in range(len(indices)):
-                    for j in range(i + 1, len(indices)):
-                        edge_indices.append([indices[i], indices[j]])
-                        edge_indices.append([indices[j], indices[i]])
+    # Reset the index to establish a clean 0 to N contiguous ID for PyTorch Geometric
+    global_df = global_df.reset_index(drop=True)
+    global_df["node_idx"] = global_df.index
 
-        # 1. Initialize the Data object with basic structure
-        edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
+    return global_df
 
-        # 2. Convert raw data to tensors
-        x = torch.tensor(all_nodes, dtype=torch.float)
-        y = torch.tensor(all_targets, dtype=torch.float).view(-1, 1)
-        unc = torch.tensor(all_uncertainties, dtype=torch.float).view(-1, 1)
-        mask = torch.tensor(all_masks, dtype=torch.bool)
 
-        # NaN Handling: Replace NaNs in features and targets with zeros
-        x = torch.nan_to_num(x, nan=0.0)
-        y = torch.nan_to_num(y, nan=0.0)
-        # Replace missing uncertainties with a small default (e.g., 0.00001 cm-1)
-        unc = torch.nan_to_num(unc, nan=0.00001)
+def generate_graph_edges(nodes_df, logger):
+    """
+    Generates Physical (Type 0) and Isotopic (Type 1) edges for the graph representation.
+    Strictly prevents cross-molecule connections.
 
-        # 3. Calculate stats only from training nodes
-        train_x = x[mask]
-        x_mean = train_x.mean(dim=0)
-        x_std = train_x.std(dim=0)
+    Args:
+        nodes_df (pd.DataFrame): The preprocessed global dataframe containing all valid nodes.
+        logger (logging.Logger): Logger instance for recording execution steps.
 
-        # Prevent division by zero OR NaNs in standard deviation
-        x_std = torch.nan_to_num(x_std, nan=1.0)
-        x_std[x_std == 0] = 1.0
+    Returns:
+        tuple: A tuple containing:
+            - edge_index (torch.Tensor): A 2xN tensor of source and destination indices.
+            - edge_attr (torch.Tensor): A 1D tensor mapping each edge to its categorical type (0 or 1).
+    """
+    logger.info("Generating Graph Edges...")
+    edges_src = []
+    edges_dst = []
+    edge_types = []
 
-        train_y = y[mask]
-        y_mean = train_y.mean()
-        y_std = train_y.std()
+    # Group by molecule to ensure isolated subgraphs
+    for mol_name, mol_df in nodes_df.groupby("molecule"):
 
-        if y_std == 0 or torch.isnan(y_std):
-            y_std = torch.tensor(1.0)
+        # Fast lookup dictionary: (iso_id, v, J) -> node_idx
+        state_lookup = mol_df.set_index(["iso_id", "v", "J"])["node_idx"].to_dict()
 
-        # 4. Apply scaling and assign to the Data object
-        x_norm = (x - x_mean) / x_std
-        y_norm = (y - y_mean) / y_std
-        unc_norm = unc / y_std
+        # Group identical (v, J) states across different isotopologues
+        v_j_groups = {}
+        for (iso, v, J), idx in state_lookup.items():
+            if (v, J) not in v_j_groups:
+                v_j_groups[(v, J)] = []
+            v_j_groups[(v, J)].append((iso, idx))
 
-        # 5. Store uncertainties and masks as part of the Data object
-        data = Data(x=x_norm, y=y_norm, edge_index=edge_index)
-        data.unc = unc_norm
-        data.train_mask = mask
+        for (iso, v, J), src_idx in state_lookup.items():
 
-        # Assign these so they are recognized as part of the data object
-        data.x_mean = x_mean
-        data.x_std = x_std
-        data.y_mean = y_mean
-        data.y_std = y_std
+            # 1. Physical Rovibrational Transitions (Within SAME isotope)
+            allowed_neighbors = [
+                (iso, v, J - 1),
+                (iso, v, J + 1),
+                (iso, v - 1, J - 1),
+                (iso, v - 1, J + 1),
+            ]
+            for target_key in allowed_neighbors:
+                if target_key in state_lookup:
+                    edges_src.append(src_idx)
+                    edges_dst.append(state_lookup[target_key])
+                    edge_types.append(0)
 
-        # 6. Save processed data
-        torch.save(self.collate([data]), self.processed_paths[0])
+            # 2. Isotope Shift Edges (Across DIFFERENT isotopes, SAME molecule)
+            for other_iso, dst_idx in v_j_groups[(v, J)]:
+                if other_iso != iso:
+                    edges_src.append(src_idx)
+                    edges_dst.append(dst_idx)
+                    edge_types.append(1)
+
+    # Convert to PyTorch tensors
+    edge_index = torch.tensor([edges_src, edges_dst], dtype=torch.long)
+    edge_attr = torch.tensor(edge_types, dtype=torch.long)
+
+    logger.info(
+        f"Graph constructed with {len(nodes_df)} nodes and {edge_index.shape[1]} edges."
+    )
+    return edge_index, edge_attr
+
+
+def prepare_molecule_graph(config, logger):
+    """
+    Master pipeline function that generates the final PyTorch Geometric graph object
+    and the corresponding processed dataframe.
+
+    Args:
+        config (dict): Configuration dictionary containing data and molecule parameters.
+        logger (logging.Logger): Logger instance for recording execution steps.
+
+    Returns:
+        tuple: A tuple containing:
+            - pyg_graph (torch_geometric.data.Data): The un-scaled PyG graph object containing x, y, edge_index, and edge_attr.
+            - nodes_df (pd.DataFrame): The processed dataframe matching the nodes in the graph.
+            - feature_cols (list): The list of column names used to build the feature tensor.
+    """
+    nodes_df = load_and_preprocess_data(config, logger)
+    edge_index, edge_attr = generate_graph_edges(nodes_df, logger)
+
+    # Fill missing targets with 0.0 for stable tensor conversion
+    # (Masks hide these targets during training)
+    nodes_df["Ediff"] = nodes_df["Ediff"].fillna(0.0)
+
+    # Define the base feature list
+    # (Topology + Optional + Physics)
+    feature_cols = (
+        ["v", "J", "ECalc"]
+        + config["data"]["optional_quantum_features"]
+        + config["data"]["physics_features"]
+    )
+
+    # Create the raw feature tensor
+    # (Scaling occurs dynamically per fold within the training loop)
+    x = torch.tensor(nodes_df[feature_cols].values, dtype=torch.float32)
+    y = torch.tensor(nodes_df["Ediff"].values, dtype=torch.float32)
+
+    # Build base PyG Data object
+    pyg_graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+
+    return pyg_graph, nodes_df, feature_cols
