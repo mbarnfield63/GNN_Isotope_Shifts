@@ -1,0 +1,44 @@
+# ==========================================================
+# MOLECULE REGISTRY
+# ==========================================================
+# One entry per molecule, shared across every experiment config. Physical
+# constants (masses, isotope IDs) are NOT stored here -- they're derived
+# automatically from each isotopologue's formula string via src/masses.py,
+# and re-derived from each isotopologue's own ingested CSV at training time.
+#
+# electronic_state / marvel_source_code are consumed only by the ingestion
+# scripts (scripts/states_scraping.py, scripts/combining_duo_marv.py) when
+# building a molecule's CSVs from raw ExoMol/MARVEL/DUO files. Molecules
+# ingested with the old one-off scripts (CN/PN/SiN) never recorded these
+# values anywhere reusable -- left null below; fill in from the molecule's
+# ExoMol .def file before re-ingesting from scratch.
+
+CO:
+  parent_isotope: "12C16O"
+  isotopes: ["12C16O", "13C16O", "12C18O", "13C18O", "12C17O", "13C17O"]
+  electronic_state: "X(1SIGMA+)"
+  marvel_source_code: null  # ingested via combining_duo_marv.py (separate DUO + MARVEL files, no Source-flag column)
+
+CN:
+  parent_isotope: "12C14N"
+  isotopes: ["12C14N"]
+  electronic_state: null  # TODO: fill in before re-ingesting
+  marvel_source_code: null  # TODO: fill in before re-ingesting
+
+PN:
+  parent_isotope: "31P14N"
+  isotopes: ["31P14N"]
+  electronic_state: null  # TODO: fill in before re-ingesting
+  marvel_source_code: null  # TODO: fill in before re-ingesting
+
+SiN:
+  parent_isotope: "28Si14N"
+  isotopes: ["28Si14N"]
+  electronic_state: null  # TODO: fill in before re-ingesting
+  marvel_source_code: null  # TODO: fill in before re-ingesting
+
+SiO:
+  parent_isotope: "28Si16O"
+  isotopes: ["28Si16O"]
+  electronic_state: "X(1SIGMA+)"
+  marvel_source_code: "Ma"

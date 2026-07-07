@@ -4,12 +4,39 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 
+from src.registry import get_molecule
+
+# Columns an ingested CSV should carry for PS-band grouping. Older CSVs
+# (ingested before this was required) may lack them -- fall back to a
+# placeholder so the pipeline still runs, but the PS baseline's band split
+# degrades to (v) alone for that molecule until it's re-ingested.
+BAND_KEY_COLS = ["ElecState", "Omega", "parity"]
+BAND_KEY_DEFAULTS = {"ElecState": "UNKNOWN", "Omega": np.nan, "parity": ""}
+
+
+def _read_isotopologue_csv(input_dir, iso_name, logger):
+    file_path = os.path.join(input_dir, f"{iso_name}.csv")
+    if not os.path.exists(file_path):
+        return None
+    df = pd.read_csv(file_path)
+
+    missing_band_cols = [c for c in BAND_KEY_COLS if c not in df.columns]
+    if missing_band_cols:
+        logger.warning(
+            f"  - {iso_name}: missing band-key columns {missing_band_cols} "
+            "(legacy ingestion) -- PS baseline will group by v only for this molecule."
+        )
+        for col in missing_band_cols:
+            df[col] = BAND_KEY_DEFAULTS[col]
+
+    return df
+
 
 def load_and_preprocess_data(config, logger):
     """
-    Iterates through the configuration dictionaries, loads CSV files, applies
-    energy cutoffs, calculates physical ratios, and concatenates the processed
-    data into a global dataframe.
+    Iterates through the configured molecules (by registry name), loads CSV
+    files, applies energy cutoffs, calculates physical ratios, and
+    concatenates the processed data into a global dataframe.
 
     Args:
         config (dict): Configuration dictionary containing data and molecule parameters.
@@ -23,24 +50,31 @@ def load_and_preprocess_data(config, logger):
     max_energy = config["data"]["max_energy_cutoff"]
     physics_features = config["data"]["physics_features"]
     optional_features = config["data"]["optional_quantum_features"]
+    registry_path = config["data"].get("registry", "configs/molecules.yaml")
 
     all_nodes = []
 
-    for mol_name, mol_config in config["molecules"].items():
+    for mol_name in config["molecules"]:
         logger.info(f"Processing Molecule: {mol_name}")
+        mol_entry = get_molecule(mol_name, registry_path)
 
-        parent_mass_A = mol_config["parent_mass_A"]
-        parent_mass_B = mol_config["parent_mass_B"]
-        parent_mu = mol_config["parent_reduced_mass"]
+        # Parent reference masses come from the parent isotopologue's own CSV
+        # (already resolved at ingestion time via src/masses.py) rather than
+        # being re-typed in the experiment config.
+        parent_df = _read_isotopologue_csv(input_dir, mol_entry["parent_isotope"], logger)
+        if parent_df is None:
+            raise FileNotFoundError(
+                f"{mol_name}: parent isotopologue CSV {mol_entry['parent_isotope']}.csv not found in {input_dir}"
+            )
+        parent_mass_A = parent_df["mass_A"].iloc[0]
+        parent_mass_B = parent_df["mass_B"].iloc[0]
+        parent_mu = parent_df["reduced_mass"].iloc[0]
 
-        for iso_name, iso_id in zip(mol_config["isotopes"], mol_config["isotope_ids"]):
-            file_path = os.path.join(input_dir, f"{iso_name}.csv")
-
-            if not os.path.exists(file_path):
-                logger.warning(f"File {file_path} not found. Skipping.")
+        for iso_name, iso_id in zip(mol_entry["isotopes"], mol_entry["isotope_ids"]):
+            df = _read_isotopologue_csv(input_dir, iso_name, logger)
+            if df is None:
+                logger.warning(f"File {iso_name}.csv not found in {input_dir}. Skipping.")
                 continue
-
-            df = pd.read_csv(file_path)
 
             # 1. Apply Energy Cutoff
             initial_count = len(df)
@@ -72,6 +106,10 @@ def load_and_preprocess_data(config, logger):
                 df["mu_anharmonic_ratio"] = (df["reduced_mass"] / parent_mu) ** -1.5
             if "mu_centrifugal_ratio" in physics_features:
                 df["mu_centrifugal_ratio"] = (df["reduced_mass"] / parent_mu) ** -2.0
+
+            # (Always available to the model's physics bypass, mirroring PS's own
+            # a*J_ext(J_ext+1)+sigma functional form -- see model.py)
+            df["j_ext_j1"] = df["J"] * (df["J"] + 1)
 
             # 4. Handle Optional Quantum Features
             # (Padding for closed-shell molecules to maintain consistent tensor dimensions)
@@ -146,6 +184,9 @@ def generate_graph_edges(nodes_df, logger):
                     edge_types.append(0)
 
             # 2. Isotope Shift Edges (Across DIFFERENT isotopes, SAME molecule)
+            # (Single-isotopologue molecules naturally produce zero edges of
+            # this type -- the model then trains on physical edges alone,
+            # which is exactly the PS-style J-extrapolation regime.)
             for other_iso, dst_idx in v_j_groups[(v, J)]:
                 if other_iso != iso:
                     edges_src.append(src_idx)
@@ -185,11 +226,13 @@ def prepare_molecule_graph(config, logger):
     nodes_df["Ediff"] = nodes_df["Ediff"].fillna(0.0)
 
     # Define the base feature list
-    # (Topology + Optional + Physics)
+    # (Topology + Optional + Physics ratios + J(J+1), in this exact order --
+    # model.py slices the bypass features off the end of this tensor)
     feature_cols = (
         ["v", "J", "ECalc"]
         + config["data"]["optional_quantum_features"]
         + config["data"]["physics_features"]
+        + ["j_ext_j1"]
     )
 
     # Create the raw feature tensor

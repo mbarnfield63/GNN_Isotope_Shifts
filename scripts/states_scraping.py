@@ -1,50 +1,54 @@
-import pandas as pd
+"""
+Ingest a single ExoMol .states file (one isotopologue, MARVEL source embedded
+via a per-row Source-code flag) into this project's standard states CSV.
+
+Usage:
+    uv run python -m scripts.states_scraping \
+        --molecule SiO --isotope 28Si16O \
+        --source "C:/path/to/28Si-16O__SiOUVenIR.states"
+"""
+
+import argparse
 import os
 
-# ==========================================================
-# CONFIGURATION SECTION
-# ==========================================================
+import pandas as pd
 
-# Molecule name
-MOLECULE_NAME = "12C14N"
-MASS_A = 12.0000000  # Atomic mass of C
-MASS_B = 14.0030740  # Atomic mass of N
-X_ELEC = "X"  # Target electronic state to extract
-MARVEL_SOURCE_CODE = "M"  # Code in the .states file indicating MARVEL data
+from src.masses import isotopologue_masses
+from src.registry import get_molecule
 
-# 1. Path to the source ExoMol .states file
-SOURCE_STATES_FILE = r"C:\Code\Work\raw_data_store\Diatomics\CN\12C-14N__KTPSYT.states"
-# 2. List of ALL entries/columns as they appear in the source file
-# Note: ExoMol formats vary by molecule; check the associated .def file.
+# ExoMol .states files are whitespace-separated with no header; columns beyond
+# these core ones vary by molecule (see the associated .def file).
 FULL_COLUMN_NAMES = [
-    "ID",  # State ID
-    "E",  # Energy (cm-1)
-    "gtot",  # Total degeneracy
-    "J",  # Total angular momentum
-    "unc",  # Uncertainty
-    "tau",  # Lifetime (optional)
-    "gfactor",  # Lande g-factor (optional)
-    "parity",  # Parity (e.g., '+' or '-')
-    "rotlessparity",  # Rotationless parity (optional)
-    "hunda:ElectronicState",  # Electronic state label
-    "hunda:v",  # Vibrational quantum number
-    "hunda:Lambda",  # Projection of electronic angular momentum
-    "hunda:Sigma",  # Projection of electronic spin
-    "hunda:Omega",  # Projection of total angular momentum
-    "Source",  # Source of the data (e.g., MARVEL, calculated)
-    "Ecalc",  # Calculated energy (optional)
+    "ID",
+    "E",
+    "gtot",
+    "J",
+    "unc",
+    "tau",
+    "gfactor",
+    "parity",
+    "rotlessparity",
+    "hunda:ElectronicState",
+    "hunda:v",
+    "hunda:Lambda",
+    "hunda:Sigma",
+    "hunda:Omega",
+    "Source",
+    "Ecalc",
 ]
 
-# 3. Rename columns as required
 RENAMING_MAP = {
     "E": "EMarv",
     "Ecalc": "ECalc",
     "hunda:v": "v",
     "hunda:ElectronicState": "ElecState",
+    "hunda:Omega": "Omega",
 }
 
-# 4. The specific columns for new CSV
-COLUMNS = [
+# Band-key columns (ElecState/Omega/parity) are always retained alongside the
+# core physics columns, so the PS baseline can group by vibronic band for any
+# molecule uniformly.
+OUTPUT_COLUMNS = [
     "mass_A",
     "mass_B",
     "reduced_mass",
@@ -54,69 +58,48 @@ COLUMNS = [
     "EMarv",
     "unc",
     "Ediff",
+    "ElecState",
+    "Omega",
+    "parity",
 ]
 
-# 5. Output Naming Format
-OUTPUT_DIRECTORY = "data/states"
-OUTPUT_FILENAME = f"{MOLECULE_NAME}.csv"
 
-# ==========================================================
-# SCRAPER LOGIC
-# ==========================================================
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--molecule", required=True, help="Registry molecule name, e.g. SiO")
+    parser.add_argument("--isotope", required=True, help="Isotopologue formula, e.g. 28Si16O")
+    parser.add_argument("--source", required=True, help="Path to the raw ExoMol .states file")
+    parser.add_argument("--output-dir", default="data/states")
+    parser.add_argument("--registry", default="configs/molecules.yaml")
+    return parser.parse_args()
 
 
-def process_states():
-    # Ensure output directory exists
-    if not os.path.exists(OUTPUT_DIRECTORY):
-        os.makedirs(OUTPUT_DIRECTORY)
-
-    print(f"Opening file: {SOURCE_STATES_FILE}")
-
-    try:
-        # ExoMol .states files are space-separated (variable whitespace)
-        # and do not contain headers.
-        df = pd.read_csv(
-            SOURCE_STATES_FILE,
-            sep=r"\s+",
-            names=FULL_COLUMN_NAMES,
-            header=None,
+def process_states(molecule: str, isotope: str, source_path: str, output_dir: str, registry_path: str):
+    mol_entry = get_molecule(molecule, registry_path)
+    if mol_entry["electronic_state"] is None or mol_entry["marvel_source_code"] is None:
+        raise ValueError(
+            f"{molecule}: electronic_state/marvel_source_code not set in {registry_path} -- "
+            "fill these in from the molecule's ExoMol .def file before ingesting."
         )
 
-        # Rename columns if needed
-        if RENAMING_MAP:
-            df.rename(columns=RENAMING_MAP, inplace=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-        # Filter to only Electronic State X
-        df = df[df["ElecState"] == X_ELEC].copy()
+    df = pd.read_csv(source_path, sep=r"\s+", names=FULL_COLUMN_NAMES, header=None)
+    df = df.rename(columns=RENAMING_MAP)
 
-        # If source is not MARVEL, set EMarv to NaN since it's not from MARVEL
-        df.loc[df["Source"] != MARVEL_SOURCE_CODE, "EMarv"] = pd.NA
+    df = df[df["ElecState"] == mol_entry["electronic_state"]].copy()
+    df.loc[df["Source"] != mol_entry["marvel_source_code"], "EMarv"] = pd.NA
 
-        # Masses and reduced mass calcs
-        mu = (MASS_A * MASS_B) / (MASS_A + MASS_B)
-        df = df.assign(
-            mass_A=MASS_A,
-            mass_B=MASS_B,
-            reduced_mass=mu,
-        )
-        # Calculate energy difference where both EMarv and ECalc are available
-        df["Ediff"] = df["EMarv"] - df["ECalc"]
+    masses = isotopologue_masses(isotope)
+    df = df.assign(**masses)
+    df["Ediff"] = df["EMarv"] - df["ECalc"]
 
-        # Select only the columns needed for the final output
-        extracted_df = df[COLUMNS]
-
-        # Save to CSV
-        save_path = os.path.join(OUTPUT_DIRECTORY, OUTPUT_FILENAME)
-        extracted_df.to_csv(save_path, index=False)
-
-        print(f"Success! Extracted {len(COLUMNS)} columns.")
-        print(f"Saved to: {save_path}")
-
-    except FileNotFoundError:
-        print(f"Error: {SOURCE_STATES_FILE} not found.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    out_df = df[OUTPUT_COLUMNS]
+    save_path = os.path.join(output_dir, f"{isotope}.csv")
+    out_df.to_csv(save_path, index=False)
+    print(f"Saved {len(out_df)} states to {save_path}")
 
 
 if __name__ == "__main__":
-    process_states()
+    args = parse_args()
+    process_states(args.molecule, args.isotope, args.source, args.output_dir, args.registry)

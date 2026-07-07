@@ -6,7 +6,7 @@ from tabulate import tabulate
 
 from src.dataset import prepare_molecule_graph
 from src.plotting import plot_extrapolation_improvements, plot_standard_split_residuals
-from src.train import run_loio_cross_validation, run_standard_split
+from src.train import run_loio_cross_validation, run_j_extrapolation_split
 from src.utils import setup_experiment, set_seed
 
 
@@ -141,55 +141,18 @@ def main():
     pyg_graph, nodes_df, feature_cols = prepare_molecule_graph(config, logger)
 
     # 3. Execution Routing
-    mode = config["execution"].get("mode", "loio")
+    # (Mode is no longer a manual config field: LOIO runs automatically
+    # whenever the graph has more than one MARVEL isotopologue -- the
+    # isotope-extrapolation axis -- and the J-extrapolation split always
+    # runs, since every molecule has a J axis regardless of isotope count.)
     is_ensemble = config["execution"].get("ensemble_run", False)
+    is_multi_iso = nodes_df["iso_id"].nunique() > 1
 
-    if mode == "standard":
-        group_column = "Run Type"
-        if is_ensemble:
-            logger.info("Mode: Standard Split (Ensemble Enabled)")
-            final_results = execute_ensemble(
-                config,
-                pyg_graph,
-                nodes_df,
-                feature_cols,
-                paths,
-                logger,
-                run_standard_split,
-                group_column,
-            )
-        else:
-            logger.info("Mode: Standard Split (Single Seed)")
-            set_seed(config["execution"]["base_seed"], logger)
-
-            # Execute single standard split run
-            final_results, targets, preds, test_energies = run_standard_split(
-                config, pyg_graph, nodes_df, feature_cols, paths["root"], logger
-            )
-
-            logger.info("\nFINAL RESULTS")
-            logger.info(
-                "\n"
-                + tabulate(
-                    final_results, headers="keys", tablefmt="grid", stralign="center"
-                )
-            )
-            final_results.to_csv(
-                os.path.join(paths["root"], "standard_summary_results.csv"), index=False
-            )
-
-            # Generate performance plots
-            logger.info("Generating standard split performance plots...")
-            ml_corrected_error = targets - preds
-            plot_standard_split_residuals(
-                targets, ml_corrected_error, test_energies, paths["root"]
-            )
-
-    elif mode == "loio":
+    if is_multi_iso:
         group_column = "Held-Out Isotopologue"
         if is_ensemble:
             logger.info("Mode: LOIO Cross-Validation (Ensemble Enabled)")
-            final_results = execute_ensemble(
+            loio_results = execute_ensemble(
                 config,
                 pyg_graph,
                 nodes_df,
@@ -202,27 +165,55 @@ def main():
         else:
             logger.info("Mode: LOIO Cross-Validation (Single Seed)")
             set_seed(config["execution"]["base_seed"], logger)
-            final_results = run_loio_cross_validation(
+            loio_results = run_loio_cross_validation(
                 config, pyg_graph, nodes_df, feature_cols, paths["root"], logger
             )
-
-            logger.info("\nFINAL RESULTS")
+            logger.info("\nFINAL RESULTS (LOIO)")
             logger.info(
                 "\n"
                 + tabulate(
-                    final_results, headers="keys", tablefmt="grid", stralign="center"
+                    loio_results, headers="keys", tablefmt="grid", stralign="center"
                 )
             )
-            final_results.to_csv(
-                os.path.join(paths["root"], "loio_summary_results.csv"), index=False
-            )
 
-        # Generate performance plots
+        loio_results.to_csv(
+            os.path.join(paths["root"], "loio_summary_results.csv"), index=False
+        )
         logger.info("Generating extrapolation performance plots...")
-        plot_extrapolation_improvements(final_results, paths["root"])
+        plot_extrapolation_improvements(loio_results, paths["root"])
 
+    group_column = "Run Type"
+    if is_ensemble:
+        logger.info("Mode: J-Extrapolation Split (Ensemble Enabled)")
+        j_results = execute_ensemble(
+            config,
+            pyg_graph,
+            nodes_df,
+            feature_cols,
+            paths,
+            logger,
+            run_j_extrapolation_split,
+            group_column,
+        )
     else:
-        logger.error(f"Unknown execution mode: {mode}")
+        logger.info("Mode: J-Extrapolation Split (Single Seed)")
+        set_seed(config["execution"]["base_seed"], logger)
+        j_results, targets, preds, test_energies = run_j_extrapolation_split(
+            config, pyg_graph, nodes_df, feature_cols, paths["root"], logger
+        )
+        logger.info("\nFINAL RESULTS (J-Extrapolation)")
+        logger.info(
+            "\n" + tabulate(j_results, headers="keys", tablefmt="grid", stralign="center")
+        )
+
+        logger.info("Generating J-extrapolation performance plots...")
+        plot_standard_split_residuals(
+            targets, targets - preds, test_energies, paths["root"]
+        )
+
+    j_results.to_csv(
+        os.path.join(paths["root"], "j_extrapolation_summary_results.csv"), index=False
+    )
 
     logger.info(f"Pipeline complete. All artifacts saved to: {paths['root']}")
 

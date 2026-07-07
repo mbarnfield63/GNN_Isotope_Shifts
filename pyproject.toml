@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10,<3.11"
 dependencies = [
     "ipykernel>=7.2.0",
+    "molmass>=2025.4.14",
     "openpyxl>=3.1.5",
     "pandas>=2.3.3",
     "scikit-learn>=1.7.2",
@@ -13,4 +14,9 @@ dependencies = [
     "tabulate>=0.10.0",
     "torch>=2.11.0",
     "torch-geometric>=2.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
 ]

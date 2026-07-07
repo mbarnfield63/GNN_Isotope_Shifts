@@ -7,6 +7,9 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from src.model import HybridIsotopologueGATv2
+from src.ps_baseline import fit_predict_ps_baseline, BAND_COLS
+from src.masses import exomol_isotope_id
+from src.registry import get_molecule
 
 
 def apply_dynamic_scaling(pyg_graph, nodes_df, config, feature_cols, train_mask):
@@ -17,7 +20,9 @@ def apply_dynamic_scaling(pyg_graph, nodes_df, config, feature_cols, train_mask)
     scaler = StandardScaler()
 
     # 1. Isolate the columns that should be scaled
-    physics_cols = config["data"]["physics_features"]
+    # (j_ext_j1 is part of the physics bypass too -- see model.py -- so it's
+    # excluded from StandardScaler along with the configured ratio features)
+    physics_cols = config["data"]["physics_features"] + ["j_ext_j1"]
     scale_cols = [col for col in feature_cols if col not in physics_cols]
 
     # 2. Extract training indices
@@ -173,15 +178,19 @@ def run_loio_cross_validation(
 ):
     logger.info("Initializing LOIO Cross-Validation...")
 
-    parent_isotopes = [
-        str(mol_cfg["parent_isotope"]) for mol_cfg in config["molecules"].values()
+    registry_path = config["data"].get("registry", "configs/molecules.yaml")
+    parent_iso_ids = [
+        str(exomol_isotope_id(get_molecule(mol_name, registry_path)["parent_isotope"]))
+        for mol_name in config["molecules"]
     ]
     all_iso_ids = nodes_df["iso_id"].astype(str).unique()
-    minor_isos = [iso for iso in all_iso_ids if iso not in parent_isotopes]
+    minor_isos = [iso for iso in all_iso_ids if iso not in parent_iso_ids]
 
     loio_results = []
 
-    iso_tensor_str = torch.tensor(nodes_df["iso_id"].astype(str).values)
+    # torch.tensor can't hold string dtypes -- keep isotope IDs in numpy and
+    # only convert the resulting boolean masks to torch tensors.
+    iso_id_str = nodes_df["iso_id"].astype(str).values
     has_marvel = torch.tensor(nodes_df["is_known_marvel"].values, dtype=torch.bool)
 
     for unseen_iso in minor_isos:
@@ -192,8 +201,8 @@ def run_loio_cross_validation(
         fold_dir = os.path.join(output_dir, "checkpoints", f"fold_iso_{unseen_iso}")
         os.makedirs(fold_dir, exist_ok=True)
 
-        test_mask = (iso_tensor_str == unseen_iso) & has_marvel
-        train_val_pool = torch.where((iso_tensor_str != unseen_iso) & has_marvel)[0]
+        test_mask = torch.from_numpy(iso_id_str == unseen_iso) & has_marvel
+        train_val_pool = torch.where(torch.from_numpy(iso_id_str != unseen_iso) & has_marvel)[0]
 
         train_val_pool = train_val_pool[torch.randperm(len(train_val_pool))]
         val_size = max(1, int(0.1 * len(train_val_pool)))
@@ -240,6 +249,100 @@ def run_loio_cross_validation(
         )
 
     return pd.DataFrame(loio_results)
+
+
+def build_j_extrapolation_masks(nodes_df, holdout_frac=0.2, min_band_points=5):
+    """
+    Per vibronic band (molecule, isotopologue, electronic state, v, Omega,
+    parity), holds out the highest-J MARVEL-covered states as the test set.
+    This exercises true J-extrapolation -- PS's own task -- rather than the
+    interpolation a random split would measure. Bands too small to split
+    meaningfully (< min_band_points known states) are left entirely in train.
+    """
+    has_marvel = nodes_df["is_known_marvel"].values
+    j_values = nodes_df["J"].values
+    test_mask = np.zeros(len(nodes_df), dtype=bool)
+
+    for _, positions in nodes_df.groupby(BAND_COLS, dropna=False).indices.items():
+        band_known = positions[has_marvel[positions]]
+        if len(band_known) < min_band_points:
+            continue
+        n_test = max(1, int(round(len(band_known) * holdout_frac)))
+        # Highest-J known states become the test set (extrapolation, not interpolation)
+        test_positions = band_known[np.argsort(j_values[band_known])[-n_test:]]
+        test_mask[test_positions] = True
+
+    train_val_pool = np.where(has_marvel & ~test_mask)[0]
+    return test_mask, train_val_pool
+
+
+def run_j_extrapolation_split(config, pyg_graph, nodes_df, feature_cols, output_dir, logger):
+    """
+    Trains on low/mid-J states and tests on held-out high-J states per
+    vibronic band -- the J-axis counterpart to LOIO's isotope-axis
+    extrapolation, and the only fair comparison against ExoMol's Predicted
+    Shift (PS) method (which is defined purely as out-of-range J
+    extrapolation). Runs for every molecule, single- or multi-isotopologue.
+    """
+    logger.info("Initializing J-Extrapolation Split...")
+
+    holdout_frac = config["training"].get("j_holdout_frac", 0.2)
+    test_mask_np, train_val_pool = build_j_extrapolation_masks(nodes_df, holdout_frac)
+
+    train_val_pool = train_val_pool[np.random.permutation(len(train_val_pool))]
+    val_size = max(1, int(0.1 * len(train_val_pool)))
+
+    train_mask = torch.zeros(len(nodes_df), dtype=torch.bool)
+    val_mask = torch.zeros(len(nodes_df), dtype=torch.bool)
+    test_mask = torch.from_numpy(test_mask_np)
+
+    val_mask[train_val_pool[:val_size]] = True
+    train_mask[train_val_pool[val_size:]] = True
+
+    scaled_x = apply_dynamic_scaling(pyg_graph, nodes_df, config, feature_cols, train_mask)
+    fold_graph = pyg_graph.clone()
+    fold_graph.x = scaled_x
+
+    fold_dir = os.path.join(output_dir, "checkpoints", "j_extrapolation_split")
+    os.makedirs(fold_dir, exist_ok=True)
+
+    test_mae, preds, targets = train_single_fold(
+        fold_graph, nodes_df, train_mask, val_mask, test_mask, config, fold_dir, logger
+    )
+
+    # PS baseline sees exactly the same information as the GNN (train + val
+    # pool), evaluated on the exact same held-out test set.
+    ps_fit_mask = (train_mask | val_mask).numpy()
+    ps_df = fit_predict_ps_baseline(nodes_df, ps_fit_mask)
+    ps_preds = ps_df["ps_predicted_correction"].values[test_mask.numpy()]
+    ps_mae = np.abs(targets - ps_preds).mean()
+
+    orig_mae = np.abs(targets).mean()
+    gnn_improvement = ((orig_mae - test_mae) / orig_mae) * 100
+    ps_improvement = ((orig_mae - ps_mae) / orig_mae) * 100
+
+    logger.info(
+        f"J-Extrapolation | Original MAE: {orig_mae:.5f} | "
+        f"GNN MAE: {test_mae:.5f} ({gnn_improvement:.2f}%) | "
+        f"PS Baseline MAE: {ps_mae:.5f} ({ps_improvement:.2f}%)"
+    )
+
+    result_df = pd.DataFrame(
+        [
+            {
+                "Run Type": "J-Extrapolation Split",
+                "Original MAE (cm-1)": orig_mae,
+                "Extrapolated MAE (cm-1)": test_mae,
+                "Improvement (%)": gnn_improvement,
+                "PS Baseline MAE (cm-1)": ps_mae,
+                "PS Baseline Improvement (%)": ps_improvement,
+            }
+        ]
+    )
+
+    test_energies = nodes_df["ECalc"].values[test_mask.numpy()]
+
+    return result_df, targets, preds, test_energies
 
 
 def run_standard_split(config, pyg_graph, nodes_df, feature_cols, output_dir, logger):

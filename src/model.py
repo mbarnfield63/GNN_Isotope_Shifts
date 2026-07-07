@@ -12,7 +12,9 @@ class HybridIsotopologueGATv2(nn.Module):
     1. A Graph Topology Trunk (GATv2) that learns state-dependent corrections
        (e.g., local perturbations, centrifugal distortion) using the full feature set.
     2. A Strictly Linear Physics Bypass that explicitly scales independent Born-Oppenheimer
-       breakdown mass ratios without activation functions to ensure stable out-of-bounds extrapolation.
+       breakdown mass ratios (the isotopologue-extrapolation axis) plus a J_ext(J_ext+1)
+       term mirroring ExoMol's Predicted Shift formula (the J-extrapolation axis), without
+       activation functions, to ensure stable out-of-bounds extrapolation on both axes.
 
     Args:
         config (dict): Configuration dictionary containing model hyperparameters.
@@ -31,9 +33,13 @@ class HybridIsotopologueGATv2(nn.Module):
 
         self.dropout_rate = dropout
 
-        # Determine how many features belong to the strictly linear bypass
-        # (These are always appended to the end of the feature tensor)
-        self.num_bypass_features = len(config["data"]["physics_features"])
+        # Determine how many features belong to the strictly linear bypass.
+        # dataset.py always appends these, in this order, to the end of the
+        # feature tensor: [mass-ratio terms...] + [j_ext_j1]. Only the ratio
+        # terms get zero-centered (they're ~1.0 at the parent isotopologue);
+        # j_ext_j1 is naturally zero at J=0 and needs no centering.
+        self.num_ratio_features = len(config["data"]["physics_features"])
+        self.num_bypass_features = self.num_ratio_features + 1
 
         # 2. Edge Embedding Layer
         # (Converts discrete edge types [0, 1, 2] into dense continuous vectors to prevent attention zeroing)
@@ -94,10 +100,16 @@ class HybridIsotopologueGATv2(nn.Module):
         edge_attr_discrete = edge_attr.long()
         edge_attr_dense = self.edge_emb(edge_attr_discrete)
 
-        # 2. Extract and Zero-Center the Physics Features
-        # (Slices the exact number of physics features from the end of the tensor)
-        # (Subtracting 1.0 ensures the parent isotope baseline is exactly 0.0)
-        bypass_features = x[:, -self.num_bypass_features :] - 1.0
+        # 2. Extract the Physics Bypass Features
+        # (Slices the bypass block from the end of the tensor: ratio terms
+        # first, then j_ext_j1 last -- see dataset.py's feature_cols order)
+        bypass_block = x[:, -self.num_bypass_features :]
+        # Zero-center only the ratio terms (subtracting 1.0 makes the parent
+        # isotope baseline exactly 0.0); j_ext_j1 is left as-is since it's
+        # already zero at J=0.
+        ratio_features = bypass_block[:, : self.num_ratio_features] - 1.0
+        j_feature = bypass_block[:, self.num_ratio_features :]
+        bypass_features = torch.cat([ratio_features, j_feature], dim=1)
 
         # 3. Execute Graph Topology Pathway
         # (The full 'x' is passed so the network recognizes specific isotopes during message passing)

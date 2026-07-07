@@ -1,26 +1,20 @@
 # ==========================================
 # GNN ISOTOPE SHIFT PIPELINE CONFIGURATION
 # ==========================================
+# Molecule physical data (masses, isotope list) lives in configs/molecules.yaml,
+# not here -- this file only names which molecule(s) to train on plus
+# training/execution settings.
 
 experiment:
-  name: "SiO_Standard_Run"
+  name: "SiO_Run"
   output_base_dir: "./data/outputs"
 
 execution:
-  # Set to standard split
-  mode: "standard"  
-  # Set to false for a single fold (ignores num_seeds)
-  ensemble_run: false  
+  ensemble_run: false
+  num_seeds: 5  # only used when ensemble_run: true
   base_seed: 42
 
-molecules:
-  SiO:
-    parent_isotope: "28Si16O"
-    isotopes: ["28Si16O"]
-    isotope_ids: [28]
-    parent_mass_A: 28.0855
-    parent_mass_B: 15.999
-    parent_reduced_mass: 10.811
+molecules: ["SiO"]
 
 # ------------------------------------------
 # DATA & FEATURES
@@ -28,16 +22,17 @@ molecules:
 data:
   input_dir: "./data/states/"
   max_energy_cutoff: 20000.0  # Keeps network focused on isotopic shifts, not high-energy breakdown
-  max_diff_cutoff: 0.1 # Filters out states where the isotopic shift exceeds 0.1 cm^-1
-  
-  # The explicit physics features that will be ZERO-CENTERED and fed to the Linear Bypass
-  physics_features: 
+  max_diff_cutoff: 0.1  # Filters out states where the isotopic shift exceeds 0.1 cm^-1
+
+  # The explicit mass-ratio features that will be ZERO-CENTERED and fed to the
+  # Linear Bypass (a J_ext(J_ext+1) term is always added automatically -- see model.py)
+  physics_features:
     - 'mass_ratio_A'
     - 'mass_ratio_B'
     - 'mu_vib_ratio'
     - 'mu_rot_ratio'
 
-  # Open-shell/Hyperfine padding: If a molecule lacks these in its .states file, 
+  # Open-shell/Hyperfine padding: If a molecule lacks these in its .states file,
   # the dataset.py script will auto-pad them with 0.0 to maintain consistent tensor dimensions.
   optional_quantum_features: []
 
@@ -49,7 +44,7 @@ model:
   hidden_dim: 32
   heads: 4
   dropout: 0.2
-  
+
   # Edge categorical embedding (0: Physical, 1: Isotopic)
   edge_embedding_dim: 8
   num_edge_types: 2
@@ -64,12 +59,12 @@ training:
 
   # Scales the target shift values to a more GNN-friendly range (e.g., 0.001 cm^-1 becomes 1.0 after scaling)
   scale_factor: 1000.0
-  
+
   # Crucial parameter separation to protect the Linear Physics bypass from shrinking
   weight_decay_gnn: 0.0001
-  weight_decay_physics: 0.0  
-  
-  # Only used if execution.mode == 'standard'
-  train_split: 0.8
-  val_split: 0.1
-  test_split: 0.1
+  weight_decay_physics: 0.0
+
+  # Fraction of each vibronic band's highest-J MARVEL states held out for the
+  # J-extrapolation split (always run -- see src/train.py run_j_extrapolation_split;
+  # this is SiO's only eval mode since it has just one MARVEL isotopologue)
+  j_holdout_frac: 0.2

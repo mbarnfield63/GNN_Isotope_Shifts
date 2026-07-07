@@ -6,7 +6,7 @@
 # training/execution settings.
 
 experiment:
-  name: "CN_Run"
+  name: "PN_Run"
   output_base_dir: "./data/outputs"
 
 execution:
@@ -14,14 +14,14 @@ execution:
   num_seeds: 5  # only used when ensemble_run: true
   base_seed: 42
 
-molecules: ["CN"]
+molecules: ["PN"]
 
 # ------------------------------------------
 # DATA & FEATURES
 # ------------------------------------------
 data:
   input_dir: "./data/states/"
-  max_energy_cutoff: 20000.0  # Keeps network focused on isotopic shifts, not high-energy breakdown
+  max_energy_cutoff: 20000.0
   max_diff_cutoff: null
 
   # The explicit mass-ratio features that will be ZERO-CENTERED and fed to the
@@ -32,8 +32,6 @@ data:
     - 'mu_vib_ratio'
     - 'mu_rot_ratio'
 
-  # Open-shell/Hyperfine padding: If a molecule lacks these in its .states file,
-  # the dataset.py script will auto-pad them with 0.0 to maintain consistent tensor dimensions.
   optional_quantum_features: []
 
 # ------------------------------------------
@@ -44,8 +42,6 @@ model:
   hidden_dim: 32
   heads: 4
   dropout: 0.2
-
-  # Edge categorical embedding (0: Physical, 1: Isotopic)
   edge_embedding_dim: 8
   num_edge_types: 2
 
@@ -56,15 +52,9 @@ training:
   epochs: 2500
   learning_rate: 0.001
   patience: 100
-
-  # Scales the target shift values to a more GNN-friendly range (e.g., 0.001 cm^-1 becomes 1.0 after scaling)
   scale_factor: 1000.0
-
-  # Crucial parameter separation to protect the Linear Physics bypass from shrinking
   weight_decay_gnn: 0.0001
   weight_decay_physics: 0.0
 
-  # Fraction of each vibronic band's highest-J MARVEL states held out for the
-  # J-extrapolation split (always run -- see src/train.py run_j_extrapolation_split;
-  # this is CN's only eval mode since it has just one MARVEL isotopologue)
+  # PN has just one MARVEL isotopologue, so J-extrapolation is its only eval mode.
   j_holdout_frac: 0.2
