@@ -42,16 +42,40 @@ def test_parse_marvel(tmp_path):
 
 
 def test_process_states_masses_and_marvel_masking(tmp_path):
+    import json
+
     # SiO is a real registry entry (X(1SIGMA+), MARVEL code "Ma")
+    def_json = tmp_path / "28Si-16O.def.json"
+    def_json.write_text(
+        json.dumps(
+            {
+                "dataset": {
+                    "states": {
+                        "states_file_fields": [
+                            {"name": n}
+                            for n in [
+                                "ID", "E", "gtot", "J", "unc", "tau", "gfactor",
+                                "+/-", "e/f", "ElecState", "v",
+                                "hunda:Lambda", "hunda:Sigma", "hunda:Omega",
+                                "Auxiliary:SourceType", "Auxiliary:Ecal",
+                            ]
+                        ]
+                    }
+                }
+            }
+        )
+    )
+
     source = tmp_path / "28Si-16O.states"
-    # ID E gtot J unc tau gfactor parity rotlessparity ElecState v Lambda Sigma Omega Source Ecalc
+    # ID E gtot J unc tau gfactor +/- e/f ElecState v Lambda Sigma Omega Source Ecalc
+    # Total parity (+/-) and rotationless parity (e/f) deliberately differ here.
     source.write_text(
-        "1 0.0 1 0 0.000001 0 0 + + X(1SIGMA+) 0 0 0 0 Ma 0.0\n"
-        "2 100.0 1 1 0.000001 0 0 - - X(1SIGMA+) 0 0 0 0 Duo 99.5\n"
+        "1 0.0 1 0 0.000001 0 0 + - X(1SIGMA+) 0 0 0 0 Ma 0.0\n"
+        "2 100.0 1 1 0.000001 0 0 - + X(1SIGMA+) 0 0 0 0 Duo 99.5\n"
     )
 
     output_dir = tmp_path / "out"
-    process_states("SiO", "28Si16O", str(source), str(output_dir), "configs/molecules.yaml")
+    process_states("SiO", "28Si16O", str(source), str(def_json), str(output_dir), "configs/molecules.yaml")
 
     out_df = pd.read_csv(output_dir / "28Si16O.csv")
     assert len(out_df) == 2
@@ -60,3 +84,5 @@ def test_process_states_masses_and_marvel_masking(tmp_path):
     assert pd.isna(out_df["EMarv"].iloc[1])
     assert out_df["EMarv"].iloc[0] == 0.0
     assert set(["ElecState", "Omega", "parity"]).issubset(out_df.columns)
+    # PS bands use rotationless parity (e/f), not total parity (+/-)
+    assert list(out_df["parity"]) == ["-", "+"]

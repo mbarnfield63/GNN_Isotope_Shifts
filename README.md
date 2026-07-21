@@ -89,13 +89,18 @@ Set `execution.ensemble_run: true` in a config to repeat across
 
 ## Known limitations
 
-- CN, PN, and SiN were ingested with older, non-reusable one-off scripts
-  before this rebuild. Their `data/states/*.csv` files lack `ElecState`/
-  `Omega`/`parity` columns; the pipeline falls back to grouping by `v` alone
-  for their PS baseline (logged as a warning at load time). Re-ingest via
-  `scripts/states_scraping.py` once the ExoMol `.def` file's electronic
-  state and MARVEL source code are filled into their `configs/molecules.yaml`
-  entries (currently `null`) to get proper per-band PS fits.
+- Every `data/states/*.csv` currently checked in (CN, PN, SiN, SiO, NO, CO)
+  predates `scripts/states_scraping.py` and lacks `ElecState`/`Omega`/
+  `parity` columns -- the pipeline falls back to grouping by `v` alone for
+  the PS baseline (logged as a warning at load time), even for molecules
+  whose `configs/molecules.yaml` entry is already filled in. None of these
+  have been re-ingested through the current script yet. `states_scraping.py`
+  now derives each molecule's `.states` column layout from its ExoMol JSON
+  `.def` file (`src/def_reader.py`) rather than assuming one fixed schema --
+  it varies by Hund's coupling case and optional fields (e.g. O2/C2 have no
+  `Omega`; SO/O2 have no `gfactor`). Re-ingest via `scripts/states_scraping.py
+  --def-json <path>` once each molecule's electronic state and MARVEL source
+  code are filled into its registry entry to get proper per-band PS fits.
 - Cross-molecule multi-task learning (shared trunk across e.g. CO+SiO) is
   intentionally out of scope here -- see the archived `CO_SiO_testing`
   notebook if that direction is picked back up.
